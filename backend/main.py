@@ -28,6 +28,16 @@ except ImportError:
     _EthAccount = None
     WEB3_OK = False
 
+# Optional py-clob-client — graceful fallback if not installed
+try:
+    from py_clob_client.client import ClobClient
+    from py_clob_client.clob_types import OrderArgs, OrderType, TradeParams
+    from py_clob_client.constants import POLYGON
+    CLOB_OK = True
+except ImportError:
+    ClobClient = None
+    CLOB_OK = False
+
 _lock    = asyncio.Lock()
 _db_lock = threading.Lock()
 
@@ -458,6 +468,26 @@ async def stoploss_monitor_loop():
         await asyncio.sleep(30)
 
 # ─── ORDER RETRY: FOK → GTL fallback ─────────────────────────
+def _build_clob_client() -> "ClobClient | None":
+    """Instantiate ClobClient with real credentials. Returns None if not available."""
+    if not CLOB_OK:
+        return None
+    if not C.poly_private_key or not C.poly_api_key:
+        return None
+    try:
+        client = ClobClient(
+            host=CLOB,
+            chain_id=POLYGON,
+            key=C.poly_private_key,
+            signature_type=1,     # EOA signature
+            funder=None,
+        )
+        client.set_api_creds(client.create_or_derive_api_creds())
+        return client
+    except Exception as e:
+        S.errors.append(f"[clob_init] {str(e)[:60]}")
+        return None
+
 async def place_order_with_retry(
     market_id: str, outcome: str, price: float, size: float, sess
 ) -> dict:
@@ -484,11 +514,95 @@ async def place_order_with_retry(
                 "message": "Both FOK and GTL failed — trade missed"
             })
             return {"ok": False, "type": "MISSED", "order_id": ""}
-    # Real mode — placeholder until py-clob-client integration (Dex/Axel TODO)
+
+    # ── Real mode: py-clob-client execution ──────────────────
+    if not CLOB_OK:
+        add_log("MISSED_TRADE", {
+            "market_id": market_id, "outcome": outcome,
+            "reason": "py-clob-client not installed",
+            "message": "Install py-clob-client to enable real order execution",
+        })
+        return {"ok": False, "type": "MISSED", "order_id": ""}
+
+    try:
+        client = await asyncio.get_event_loop().run_in_executor(None, _build_clob_client)
+    except Exception as e:
+        add_log("MISSED_TRADE", {
+            "market_id": market_id, "outcome": outcome,
+            "reason": f"clob_init_error: {str(e)[:60]}",
+            "message": "Failed to initialise CLOB client",
+        })
+        return {"ok": False, "type": "MISSED", "order_id": ""}
+
+    if client is None:
+        add_log("MISSED_TRADE", {
+            "market_id": market_id, "outcome": outcome,
+            "reason": "missing_credentials",
+            "message": "POLY_PRIVATE_KEY or POLY_API_KEY not set",
+        })
+        return {"ok": False, "type": "MISSED", "order_id": ""}
+
+    # Determine token_id: YES → first token, NO → second token
+    # market_id here is the Polymarket condition_id / market_id string
+    token_id = market_id  # CLOB uses token_id per outcome; caller should pass correct token
+
+    # ── Step 1: FOK (Fill-or-Kill) ────────────────────────────
+    try:
+        fok_args = OrderArgs(
+            price=price,
+            size=size,
+            side="BUY",
+            token_id=token_id,
+        )
+        def _fok():
+            return client.create_and_post_order(fok_args, options={"order_type": OrderType.FOK})
+        resp = await asyncio.get_event_loop().run_in_executor(None, _fok)
+        order_id = resp.get("orderID") or resp.get("id") or ""
+        if resp.get("status") in ("matched", "MATCHED") or order_id:
+            add_log("ORDER_FOK_OK", {
+                "market_id": market_id, "outcome": outcome,
+                "order_id": order_id, "size": size, "price": price,
+                "message": f"FOK filled: {order_id}",
+            })
+            return {"ok": True, "type": "FOK", "order_id": order_id}
+    except Exception as e:
+        add_log("ORDER_FOK_FAIL", {
+            "market_id": market_id, "outcome": outcome,
+            "error": str(e)[:80],
+            "message": "FOK failed — attempting GTL fallback",
+        })
+
+    # ── Step 2: GTL limit order @ $0.95 ──────────────────────
+    gtl_price = min(0.95, price)
+    try:
+        gtl_args = OrderArgs(
+            price=gtl_price,
+            size=size,
+            side="BUY",
+            token_id=token_id,
+        )
+        def _gtl():
+            return client.create_and_post_order(gtl_args, options={"order_type": OrderType.GTD})
+        resp = await asyncio.get_event_loop().run_in_executor(None, _gtl)
+        order_id = resp.get("orderID") or resp.get("id") or ""
+        if order_id:
+            add_log("ORDER_GTL_FALLBACK", {
+                "market_id": market_id, "outcome": outcome,
+                "order_id": order_id, "size": size, "price": gtl_price,
+                "message": f"GTL limit posted @ ${gtl_price}: {order_id}",
+            })
+            return {"ok": True, "type": "GTL", "order_id": order_id}
+    except Exception as e:
+        add_log("ORDER_GTL_FAIL", {
+            "market_id": market_id, "outcome": outcome,
+            "error": str(e)[:80],
+            "message": "GTL fallback also failed",
+        })
+
+    # ── Step 3: Both failed → MISSED_TRADE ───────────────────
     add_log("MISSED_TRADE", {
         "market_id": market_id, "outcome": outcome,
-        "reason": "CLOB client integration pending",
-        "message": "Real order execution not yet implemented"
+        "message": "Both FOK and GTL failed — trade missed",
     })
     return {"ok": False, "type": "MISSED", "order_id": ""}
 
@@ -1111,6 +1225,143 @@ async def close_position(pos: dict, won: bool):
     await broadcast({"type": "positions", "data": open_pos()})
     await broadcast({"type": "stats", "data": get_stats()})
 
+# ─── AUTO-CLAIM / REDEEM (Sprint 2) ──────────────────────────
+async def redeem_winning_positions():
+    """
+    Real mode only: periodically claim/redeem USDC for resolved winning positions.
+    Polls Polymarket CLOB API to check resolution status, calls redeem if market is resolved.
+    After successful claim → updates capital and broadcasts balance_update.
+    Runs every 60 seconds. Sim mode skips (resolver_loop handles sim auto-resolve).
+    """
+    if MODE != "real":
+        return  # sim has resolver_loop; nothing to do here
+
+    await asyncio.sleep(30)  # initial grace — let bot warm up first
+
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as sess:
+        while True:
+            try:
+                # Find positions that may have resolved: status=open but opened > resolve_sec ago
+                now = datetime.now(timezone.utc)
+                candidates = [
+                    p for p in list(S.positions)
+                    if p["status"] == "open"
+                    and (now - datetime.fromisoformat(p["opened_at"])).total_seconds()
+                       >= p.get("resolve_sec", 86400) * 0.90  # check at 90% of resolve window
+                ]
+
+                for pos in candidates:
+                    market_id = pos.get("market_id", "")
+                    if not market_id:
+                        continue
+
+                    # ── 1. Check resolution status from CLOB ─────────────
+                    resolved = False
+                    winning  = False
+                    try:
+                        headers = {"POLY-API-KEY": C.poly_api_key} if C.poly_api_key else {}
+                        async with sess.get(
+                            f"{CLOB}/markets/{market_id}", headers=headers
+                        ) as r:
+                            if r.status == 200:
+                                mkt_data = await r.json()
+                                resolved = mkt_data.get("closed", False) or mkt_data.get("resolved", False)
+                                if resolved:
+                                    # Determine if our outcome won
+                                    outcome_prices = mkt_data.get("outcomePrices", [])
+                                    tokens = mkt_data.get("tokens", [])
+                                    for tok in tokens:
+                                        if tok.get("outcome", "").upper() == pos.get("outcome", "").upper():
+                                            # Resolved winning = price settled at 1.0
+                                            tok_price = float(tok.get("price", 0))
+                                            winning = tok_price >= 0.99
+                                            break
+                    except Exception as e:
+                        S.errors.append(f"[redeem_check] {str(e)[:60]}")
+                        continue
+
+                    if not resolved:
+                        continue  # market not yet settled
+
+                    if not winning:
+                        # Market resolved but we lost — close as lost without CLOB call
+                        add_log("RESOLVED_LOST", {
+                            "id": pos["id"],
+                            "question": pos["question"][:50],
+                            "outcome": pos["outcome"],
+                            "message": "Market resolved: position lost",
+                        })
+                        await close_position(pos, False)
+                        continue
+
+                    # ── 2. Call CLOB redeem for winning position ──────────
+                    if not CLOB_OK:
+                        add_log("REDEEM_SKIP", {
+                            "id": pos["id"],
+                            "reason": "py-clob-client not installed",
+                            "message": "Cannot redeem — install py-clob-client",
+                        })
+                        # Still close position internally so capital is credited
+                        await close_position(pos, True)
+                        continue
+
+                    try:
+                        def _redeem():
+                            client = _build_clob_client()
+                            if client is None:
+                                return None
+                            # py-clob-client: redeem shares for a resolved market
+                            return client.redeem_positions(
+                                condition_id=market_id,
+                            )
+                        result = await asyncio.get_event_loop().run_in_executor(None, _redeem)
+                        claimed_usdc = 0.0
+                        if result:
+                            # Result may contain payout amount
+                            claimed_usdc = float(result.get("payout", 0) or result.get("amount", 0) or 0)
+
+                        # Close position in state (credits capital internally)
+                        await close_position(pos, True)
+
+                        # Refresh live USDC balance after claim
+                        try:
+                            fresh_usdc = await fetch_balance_usdc(sess)
+                            if fresh_usdc > 0:
+                                async with _lock:
+                                    S.capital = fresh_usdc
+                            S.last_balance_refresh = datetime.now(timezone.utc).isoformat()
+                        except Exception:
+                            pass
+
+                        add_log("REDEEMED", {
+                            "id":          pos["id"],
+                            "question":    pos["question"][:50],
+                            "outcome":     pos["outcome"],
+                            "claimed_usdc": round(claimed_usdc, 4),
+                            "capital":     round(S.capital, 4),
+                            "message":     f"Winning position redeemed: +${claimed_usdc:.2f} USDC",
+                        })
+                        await broadcast({"type": "balance_update", "data": {
+                            "usdc": round(S.capital, 4),
+                            "pol":  round(S.pol_left, 4),
+                            "ts":   S.last_balance_refresh,
+                            "event": "redeem",
+                            "pos_id": pos["id"],
+                        }})
+
+                    except Exception as e:
+                        S.errors.append(f"[redeem_exec] {str(e)[:60]}")
+                        add_log("REDEEM_FAIL", {
+                            "id":      pos["id"],
+                            "error":   str(e)[:80],
+                            "message": "Redeem call failed — position kept open for retry",
+                        })
+
+            except Exception as e:
+                S.errors.append(f"[redeem_loop] {str(e)[:60]}")
+
+            await asyncio.sleep(60)  # check every 60 seconds
+
 # ─── SCANNER LOOP ────────────────────────────────────────────
 async def scanner_loop():
     last_fetch = 0
@@ -1340,9 +1591,12 @@ async def startup():
     asyncio.create_task(stoploss_monitor_loop())   # Sprint 1: per-trade stop-loss
     if MODE == "sim":
         asyncio.create_task(resolver_loop())
+    if MODE == "real":
+        asyncio.create_task(redeem_winning_positions())  # Sprint 2: auto-claim winnings
     print(f"[{BOT_ID}] mode={MODE} capital=${S.capital:.2f} pol={S.pol_left} resumed={resumed}")
     print(f"[{BOT_ID}] Sprint 1: balance_floor=${C.balance_floor} daily_loss=${C.daily_loss_limit}")
     print(f"[{BOT_ID}] Sprint 1: BTC5m poll=2s entry=T-10s spike_detect=ON")
+    print(f"[{BOT_ID}] Sprint 2: real_order_exec={CLOB_OK} auto_redeem={MODE=='real'}")
     print(f"[{BOT_ID}] compound: floor(equity/10) = max_bet, min $1")
     print(f"[{BOT_ID}] gas auto-stop: < {C.gas_stop_orders} orders")
-    print(f"[{BOT_ID}] web3_ok={WEB3_OK}")
+    print(f"[{BOT_ID}] web3_ok={WEB3_OK} clob_ok={CLOB_OK}")

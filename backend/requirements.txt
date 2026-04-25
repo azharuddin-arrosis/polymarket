@@ -4,3 +4,4 @@ aiohttp==3.11.10
 python-dotenv==1.0.1
 web3==6.15.1
 eth-account==0.11.3
+py-clob-client==0.20.0
