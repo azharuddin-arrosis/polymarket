@@ -1,0 +1,7 @@
+envs/real*.env
+node_modules/
+__pycache__/
+dist/
+data/
+*.pyc
+.DS_Store

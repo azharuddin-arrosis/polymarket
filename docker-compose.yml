@@ -1,0 +1,44 @@
+version: "3.9"
+
+x-backend: &backend
+  build: { context: ./backend }
+  restart: unless-stopped
+  volumes: [shared_data:/app/data]
+  networks: [polynet]
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    interval: 15s
+    timeout: 5s
+    retries: 5
+    start_period: 15s
+
+x-bot-ui: &bot-ui
+  build: { context: ./frontend-bot }
+  restart: unless-stopped
+  networks: [polynet]
+
+services:
+  sim1:    { <<: *backend, container_name: pb-sim1-api,  env_file: envs/sim1.env,  profiles: [sim,sim1,all] }
+  sim2:    { <<: *backend, container_name: pb-sim2-api,  env_file: envs/sim2.env,  profiles: [sim,sim2,all] }
+  sim3:    { <<: *backend, container_name: pb-sim3-api,  env_file: envs/sim3.env,  profiles: [sim,sim3,all] }
+  real1:   { <<: *backend, container_name: pb-real1-api, env_file: envs/real1.env, profiles: [real,real1,all] }
+  real2:   { <<: *backend, container_name: pb-real2-api, env_file: envs/real2.env, profiles: [real,real2,all] }
+
+  dash-sim1:  { <<: *bot-ui, container_name: pb-sim1-ui,  ports: ["3101:80"], depends_on: {sim1: {condition: service_healthy}},  profiles: [sim,sim1,all], environment: [BACKEND_HOST=sim1] }
+  dash-sim2:  { <<: *bot-ui, container_name: pb-sim2-ui,  ports: ["3102:80"], depends_on: {sim2: {condition: service_healthy}},  profiles: [sim,sim2,all], environment: [BACKEND_HOST=sim2] }
+  dash-sim3:  { <<: *bot-ui, container_name: pb-sim3-ui,  ports: ["3103:80"], depends_on: {sim3: {condition: service_healthy}},  profiles: [sim,sim3,all], environment: [BACKEND_HOST=sim3] }
+  dash-real1: { <<: *bot-ui, container_name: pb-real1-ui, ports: ["3201:80"], depends_on: {real1: {condition: service_healthy}}, profiles: [real,real1,all], environment: [BACKEND_HOST=real1] }
+  dash-real2: { <<: *bot-ui, container_name: pb-real2-ui, ports: ["3202:80"], depends_on: {real2: {condition: service_healthy}}, profiles: [real,real2,all], environment: [BACKEND_HOST=real2] }
+
+  main:
+    build: { context: ./frontend-main }
+    container_name: pb-main-ui
+    restart: unless-stopped
+    ports: ["3000:80"]
+    networks: [polynet]
+    profiles: [sim,real,all]
+
+volumes:
+  shared_data:
+networks:
+  polynet: { driver: bridge }
