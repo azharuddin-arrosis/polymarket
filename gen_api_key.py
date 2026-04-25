@@ -9,13 +9,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Load dari envs/real1.env
-env_path = Path(__file__).parent / "envs" / "real1.env"
+env_path = Path(__file__).parent / "cuk" / "real1.env"
 load_dotenv(env_path)
 
 PRIVATE_KEY = os.getenv("POLY_PRIVATE_KEY", "")
 
 if not PRIVATE_KEY:
-    print("ERROR: POLY_PRIVATE_KEY kosong di envs/real1.env")
+    print("ERROR: POLY_PRIVATE_KEY kosong di cuk/real1.env")
     exit(1)
 
 if not PRIVATE_KEY.startswith("0x") or len(PRIVATE_KEY) != 66:
