@@ -10,9 +10,8 @@ const Chip = ({t,c="#444"}) => <span style={{fontSize:8,fontFamily:"var(--mono)"
 const Bar  = ({pct,c="#fff",h=2}) => <div style={{height:h,background:"#1a1a1a",borderRadius:1,overflow:"hidden"}}><div style={{height:"100%",width:`${Math.min(100,Math.max(0,pct||0))}%`,background:c,transition:"width .5s"}}/></div>
 
 const BOTS = [
-  {prefix:"sim1", label:"SIM 1", mode:"sim", port:3101},
-  {prefix:"sim2", label:"SIM 2", mode:"sim", port:3102},
-  {prefix:"sim3", label:"SIM 3", mode:"sim", port:3103},
+  {prefix:"sim1", label:"Koceng", mode:"sim", port:3101},
+  {prefix:"sim2", label:"Wedos", mode:"sim", port:3102},
   {prefix:"real1",label:"REAL 1",mode:"real",port:3201},
   {prefix:"real2",label:"REAL 2",mode:"real",port:3202},
 ]
@@ -46,8 +45,8 @@ function BotCard({prefix,label,mode,port}) {
           ["EQUITY",u2(stats?.capital),isPos?"var(--green)":"var(--red)"],
           ["P&L",sgn(pnl),isPos?"var(--green)":"var(--red)"],
           ["WIN",p1(stats?.win_rate),stats?.win_rate>=60?"var(--green)":stats?.win_rate>=45?"var(--amber)":"var(--red)"],
-          ["W/L",`${stats?.wins??0}/${stats?.losses??0}`,"#aaa"],
-          ["BET",`$${stats?.compound_bet??1}`,"var(--white)"],
+          ["W/L",`${Math.floor(stats?.wins??0)}/${Math.floor(stats?.losses??0)}`,"#aaa"],
+          ["BET",`$${Math.floor(stats?.compound_bet??1)}`,"var(--white)"],
         ].map(([l,v,c])=>(
           <div key={l} style={{padding:"2px 6px",borderRight:"1px solid var(--border)"}}>
             <div style={{fontSize:7,color:"var(--dim2)",fontFamily:"var(--mono)",textTransform:"uppercase",letterSpacing:".05em"}}>{l}</div>
@@ -63,7 +62,7 @@ function BotCard({prefix,label,mode,port}) {
           <div style={{fontSize:7,color:"var(--dim2)",fontFamily:"var(--mono)",marginTop:1}}>→${stats?.compound_next??10}</div>
         </div>
         <div>
-          <div style={{fontSize:7,color:"var(--dim2)",fontFamily:"var(--mono)",marginBottom:1}}>GAS {gas?.orders_left??"—"} orders</div>
+          <div style={{fontSize:7,color:"var(--dim2)",fontFamily:"var(--mono)",marginBottom:1}}>GAS {gas?.orders_left!=null?Math.floor(gas.orders_left):"—"} orders</div>
           <Bar pct={Math.min(100,((gas?.pol_used||0)/(gas?.pol_total||11))*100)} c={gas?.status==="critical"?"var(--red)":gas?.status==="low"?"var(--amber)":"var(--white)"} h={2}/>
           <div style={{fontSize:7,color:"var(--dim2)",fontFamily:"var(--mono)",marginTop:1}}>{(gas?.pol_left||0).toFixed(2)} POL</div>
         </div>
@@ -75,7 +74,7 @@ function BotCard({prefix,label,mode,port}) {
           :<button onClick={start} style={{padding:"1px 6px",background:"transparent",border:"1px solid var(--green)",color:"var(--green)",borderRadius:2,fontSize:8,fontFamily:"var(--mono)",cursor:"pointer"}}>▶ RUN</button>
         )}
         {gas?.paused&&<button onClick={resumeGas} style={{padding:"1px 6px",background:"transparent",border:"1px solid var(--amber)",color:"var(--amber)",borderRadius:2,fontSize:8,fontFamily:"var(--mono)",cursor:"pointer"}}>RESUME GAS</button>}
-        <span style={{marginLeft:"auto",fontSize:7,color:"var(--dim2)",fontFamily:"var(--mono)",alignSelf:"center"}}>scans:{stats?.scan_count?.toLocaleString()??"—"}</span>
+        <span style={{marginLeft:"auto",fontSize:7,color:"var(--dim2)",fontFamily:"var(--mono)",alignSelf:"center"}}>scans:{stats?.scan_count!=null?Math.floor(stats.scan_count).toLocaleString():"—"}</span>
       </div>
     </div>
   )
@@ -99,8 +98,8 @@ function DbTable({summary}) {
               return(
                 <tr key={b.bot_id} style={{borderBottom:"1px solid var(--border)",background:i%2===0?"transparent":"rgba(255,255,255,.008)"}}>
                   <td style={{padding:"2px 8px",fontFamily:"var(--mono)",fontSize:9,color:"var(--white)"}}>{b.bot_id}</td>
-                  <td style={{padding:"2px 8px",fontFamily:"var(--mono)",fontSize:9,color:"#aaa"}}>{b.total}</td>
-                  <td style={{padding:"2px 8px",fontFamily:"var(--mono)",fontSize:9,color:"#aaa"}}>{b.wins} ({wr}%)</td>
+                  <td style={{padding:"2px 8px",fontFamily:"var(--mono)",fontSize:9,color:"#aaa"}}>{Math.floor(b.total)}</td>
+                  <td style={{padding:"2px 8px",fontFamily:"var(--mono)",fontSize:9,color:"#aaa"}}>{Math.floor(b.wins)} ({wr}%)</td>
                   <td style={{padding:"2px 8px",fontFamily:"var(--mono)",fontSize:9,fontWeight:700,color:Number(b.total_pnl)>=0?"var(--green)":"var(--red)"}}>{Number(b.total_pnl)>=0?"+":""}${Number(b.total_pnl||0).toFixed(3)}</td>
                   <td style={{padding:"2px 8px",fontFamily:"var(--mono)",fontSize:9,color:Number(b.avg_pnl)>=0?"var(--green)":"var(--red)"}}>{Number(b.avg_pnl)>=0?"+":""}${Number(b.avg_pnl||0).toFixed(3)}</td>
                   <td style={{padding:"2px 8px",fontFamily:"var(--mono)",fontSize:8,color:"var(--dim)"}}>{b.last_trade?.slice(11,19)||"—"}</td>
@@ -146,7 +145,6 @@ export default function App() {
               ["Main Dashboard","localhost:3000","--"],
               ["SIM 1","localhost:3101","sim1"],
               ["SIM 2","localhost:3102","sim2"],
-              ["SIM 3","localhost:3103","sim3"],
               ["REAL 1","localhost:3201","real1"],
               ["REAL 2","localhost:3202","real2"],
             ].map(([l,url,prefix])=>(

@@ -3,7 +3,6 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 const BOTS = [
   { id:'sim1', prefix:'/s1', label:'SIM 1', mode:'sim', port:3101 },
   { id:'sim2', prefix:'/s2', label:'SIM 2', mode:'sim', port:3102 },
-  { id:'sim3', prefix:'/s3', label:'SIM 3', mode:'sim', port:3103 },
   { id:'real1',prefix:'/r1', label:'REAL 1',mode:'real',port:3201 },
   { id:'real2',prefix:'/r2', label:'REAL 2',mode:'real',port:3202 },
 ]

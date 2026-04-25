@@ -1,7 +1,10 @@
 envs/real*.env
 node_modules/
+envs
+.claude
 __pycache__/
 dist/
 data/
 *.pyc
 .DS_Store
+cuk/
