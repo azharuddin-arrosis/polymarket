@@ -81,9 +81,15 @@ class C:
     polygon_rpc         = os.getenv("POLYGON_RPC", "https://polygon-rpc.com")
 
 GAMMA    = "https://gamma-api.polymarket.com"
-BINANCE  = "https://api.binance.com/api/v3"
+BINANCE  = "https://api.binance.com/api/v3"   # fallback only
+CRYPTOCOMPARE = "https://min-api.cryptocompare.com/data"
+COINGECKO = "https://api.coingecko.com/api/v3"
 CLOB     = "https://clob.polymarket.com"
 BTC5M_WIN = 300
+
+# Persistent price sample buffer for synthetic kline generation
+# Survives across window resets; capped at 60 minutes of data (1800 samples @ 2s poll)
+_price_samples: list = []  # list of [timestamp_int, price_float]
 
 # ─── COMPOUND: floor(equity/10), min $1, max $50 ─────────────
 def compound_bet(equity: float) -> float:
@@ -414,7 +420,26 @@ async def balance_refresh_loop():
                 if MODE == "real":
                     usdc = await fetch_balance_usdc(sess)
                     if usdc > 0:
-                        S.capital = usdc
+                        open_count = len(open_pos())
+                        if open_count > 0:
+                            # Positions are open: on-chain balance includes locked funds.
+                            # Overwriting S.capital here would corrupt the available/locked split.
+                            # Only sync if drift is suspiciously large (>$5) — indicates
+                            # an external deposit or major discrepancy worth logging.
+                            expected_onchain = round(S.capital + S.locked, 4)
+                            drift = abs(usdc - expected_onchain)
+                            if drift > 5.0:
+                                add_log("BALANCE_DRIFT", {
+                                    "on_chain": round(usdc, 4),
+                                    "expected": expected_onchain,
+                                    "drift":    round(drift, 4),
+                                    "open_pos": open_count,
+                                    "message":  f"Balance drift ${drift:.2f} detected — skipping overwrite (positions open)",
+                                })
+                            # Do NOT overwrite S.capital when positions are open
+                        else:
+                            # No open positions: safe to sync capital from on-chain
+                            S.capital = usdc
 
                 S.last_balance_refresh = datetime.now(timezone.utc).isoformat()
                 add_log("BALANCE_REFRESH", {
@@ -647,7 +672,44 @@ def btc5m_secs_left(now_ts=0) -> int:
     end = btc5m_window_ts(ts) + BTC5M_WIN
     return max(0, end - ts)
 
+def _build_synthetic_klines(limit: int = 30) -> list:
+    """Build synthetic 1-minute OHLC candles from accumulated price samples."""
+    if len(_price_samples) < 2:
+        return []
+    candles = []
+    bucket: list = []
+    bucket_ts = (_price_samples[0][0] // 60) * 60
+    for ts, price in _price_samples:
+        b = (ts // 60) * 60
+        if b != bucket_ts:
+            if bucket:
+                prices = [p for _, p in bucket]
+                candles.append({"ts": bucket_ts, "open": prices[0], "high": max(prices),
+                                 "low": min(prices), "close": prices[-1], "volume": 0.0})
+            bucket = [(ts, price)]
+            bucket_ts = b
+        else:
+            bucket.append((ts, price))
+    if bucket:
+        prices = [p for _, p in bucket]
+        candles.append({"ts": bucket_ts, "open": prices[0], "high": max(prices),
+                         "low": min(prices), "close": prices[-1], "volume": 0.0})
+    return candles[-limit:] if len(candles) > limit else candles
+
 async def btc5m_fetch_klines(sess, limit=30) -> list:
+    # Try CryptoCompare (may hit rate limit on free tier)
+    try:
+        async with sess.get(f"{CRYPTOCOMPARE}/v2/histominute", params={
+            "fsym": "BTC", "tsym": "USD", "limit": limit
+        }) as r:
+            if r.status == 200:
+                data = await r.json()
+                rows = data.get("Data", {}).get("Data", [])
+                if rows and data.get("Response") != "Error":
+                    return [{"ts": int(k["time"]), "open": float(k["open"]), "high": float(k["high"]),
+                             "low": float(k["low"]), "close": float(k["close"]), "volume": float(k["volumefrom"])} for k in rows]
+    except: pass
+    # Fallback: Binance
     try:
         async with sess.get(f"{BINANCE}/klines", params={
             "symbol": "BTCUSDT", "interval": "1m", "limit": limit
@@ -657,9 +719,27 @@ async def btc5m_fetch_klines(sess, limit=30) -> list:
                 return [{"ts": int(k[0])//1000, "open": float(k[1]), "high": float(k[2]),
                          "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])} for k in data]
     except: pass
-    return []
+    # Final fallback: synthetic klines from accumulated price samples
+    return _build_synthetic_klines(limit)
 
 async def btc5m_fetch_price(sess) -> float:
+    # Primary: CoinGecko (reliable, generous free tier)
+    try:
+        async with sess.get(f"{COINGECKO}/simple/price", params={"ids": "bitcoin", "vs_currencies": "usd"}) as r:
+            if r.status == 200:
+                price = (await r.json()).get("bitcoin", {}).get("usd", 0)
+                if price > 0:
+                    return float(price)
+    except: pass
+    # Fallback: CryptoCompare
+    try:
+        async with sess.get(f"{CRYPTOCOMPARE}/price", params={"fsym": "BTC", "tsyms": "USD"}) as r:
+            if r.status == 200:
+                price = (await r.json()).get("USD", 0)
+                if price > 0:
+                    return float(price)
+    except: pass
+    # Fallback: Binance
     try:
         async with sess.get(f"{BINANCE}/ticker/price", params={"symbol": "BTCUSDT"}) as r:
             if r.status == 200:
@@ -894,6 +974,9 @@ async def btc5m_loop():
                     b5["ticks"].append(price)
                     if len(b5["ticks"]) > 30: b5["ticks"] = b5["ticks"][-30:]
                     b5["last_tick"] = price
+                    # Accumulate into global price sample buffer for synthetic klines
+                    _price_samples.append([now_ts, price])
+                    if len(_price_samples) > 1800: del _price_samples[:-1800]  # keep 60 min
 
                 # Fetch klines every 55s
                 if now_ts - b5["last_kline_fetch"] >= 55 or not b5["klines"]:
@@ -945,6 +1028,7 @@ async def btc5m_loop():
                 )
 
                 if should_fire:
+                    b5["entry_fired"] = True  # atomic set BEFORE await — prevents multi-fire on spike
                     fire_reason = (
                         "spike" if spike_detected else
                         "deadline" if hard_deadline else
@@ -966,6 +1050,8 @@ async def btc5m_loop():
 
 def get_btc5m_info():
     b5 = S.btc5m
+    klines_count = len(b5["klines"])
+    signal_ready = klines_count >= 5 and b5["btc_price"] > 0
     return {
         "slug":                   b5["slug"],
         "win_ts":                 b5["win_ts"],
@@ -983,6 +1069,8 @@ def get_btc5m_info():
         "indicators":             b5["indicators"],
         "stats":                  b5["stats"],
         "klines":                 b5["klines"][-10:],   # last 10 for mini chart
+        "klines_count":           klines_count,
+        "signal_ready":           signal_ready,
         "market_found":           bool(b5["market_data"]),
         "poll_interval":          "2s",
         "entry_window":           "T-10s→T-5s",
@@ -1173,8 +1261,51 @@ async def open_position(market: dict, sig: dict):
             "resolve_sec":  market.get("resolve_sec", 86400),
             "resolve_fmt":  market.get("resolve_fmt", "?"),
             "compound_bet": compound_bet(equity()),
+            "order_id":     "",
+            "order_type":   "",
         }
-        S.positions.append(pos)
+
+        # ── Real mode: place actual CLOB order before recording position ──
+        if MODE == "real":
+            # Release lock briefly while awaiting network I/O to avoid deadlock;
+            # we already reserved capital above so no double-entry risk.
+            pass  # lock released below via inner block pattern
+
+    # CLOB call is outside _lock to avoid holding the asyncio lock during network I/O.
+    # Capital is already reserved; rollback if order fails.
+    if MODE == "real":
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as _order_sess:
+            order_result = await place_order_with_retry(
+                market_id=market["id"],
+                outcome=sig["outcome"],
+                price=sig["price"],
+                size=size,
+                sess=_order_sess,
+            )
+        if not order_result["ok"]:
+            # Rollback reserved capital — order never reached Polymarket
+            async with _lock:
+                S.capital  = round(S.capital + size, 4)
+                S.locked   = round(S.locked  - size, 4)
+                S.pos_counter -= 1
+            add_log("ORDER_FAIL", {
+                "question":  market["question"][:55],
+                "outcome":   sig["outcome"],
+                "size":      size,
+                "order_type": order_result.get("type", ""),
+                "message":   f"Order not placed — capital rolled back ${size:.2f}",
+            })
+            await broadcast({"type": "stats", "data": get_stats()})
+            return
+        # Stamp order metadata onto the position record
+        pos["order_id"]   = order_result["order_id"]
+        pos["order_type"] = order_result["type"]
+
+    async with _lock:
+        if MODE == "real" and pos not in S.positions:
+            S.positions.append(pos)
+        elif MODE == "sim":
+            S.positions.append(pos)
         consume_gas()
         entry = add_log("OPEN", {
             "id": pos["id"], "question": pos["question"][:55],
@@ -1182,6 +1313,8 @@ async def open_position(market: dict, sig: dict):
             "size": pos["size"], "ev": pos["ev"],
             "strategy": pos["strategy"], "category": pos["category"],
             "resolve_fmt": pos["resolve_fmt"], "confidence": pos.get("confidence", 0),
+            "order_id": pos.get("order_id", ""),
+            "order_type": pos.get("order_type", "sim" if MODE == "sim" else ""),
         })
     await broadcast({"type": "log", "data": entry})
     await broadcast({"type": "positions", "data": open_pos()})

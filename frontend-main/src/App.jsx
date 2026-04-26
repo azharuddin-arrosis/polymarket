@@ -87,13 +87,13 @@ function BotCard({ prefix, label, mode, port }) {
         <div>
           <div style={{ fontSize: 7, color: "var(--dim2)", fontFamily: "var(--mono)", textTransform: "uppercase" }}>BTC DIR</div>
           <div style={{ fontFamily: "var(--mono)", fontSize: 10, fontWeight: 700, color: dc }}>
-            {btc5m?.predicted_dir ? (btc5m.predicted_dir === "UP" ? "↑ UP" : "↓ DN") : "—"}
+            {btc5m?.predicted_dir ? (btc5m.predicted_dir === "UP" ? "↑ UP" : "↓ DN") : (btc5m?.signal_ready ? "WEAK" : "—")}
           </div>
         </div>
         <div>
           <div style={{ fontSize: 7, color: "var(--dim2)", fontFamily: "var(--mono)", textTransform: "uppercase" }}>CONF</div>
           <div style={{ fontFamily: "var(--mono)", fontSize: 10, fontWeight: 700, color: btc5m?.confidence >= .7 ? "var(--green)" : btc5m?.confidence >= .4 ? "var(--amber)" : "var(--dim)" }}>
-            {btc5m?.confidence ? `${(btc5m.confidence * 100).toFixed(0)}%` : "—"}
+            {btc5m?.signal_ready ? `${((btc5m.confidence || 0) * 100).toFixed(0)}%` : "—"}
           </div>
         </div>
       </div>

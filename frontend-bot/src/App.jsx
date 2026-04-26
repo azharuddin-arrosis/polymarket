@@ -127,7 +127,7 @@ function Btc5mPanel({ d, balance, stats, gas }) {
   const {
     secs_left, btc_price, win_open, delta_pct, predicted_dir, confidence, score,
     entry_fired, in_entry_zone, indicators: ind = {}, klines = [], stats: b5s = {},
-    highest_confidence_seen = 0, prev_score = 0,
+    highest_confidence_seen = 0, prev_score = 0, signal_ready = false,
   } = d
   const dc   = predicted_dir === 'UP' ? 'var(--green)' : predicted_dir === 'DOWN' ? 'var(--red)' : 'var(--dim)'
   const prog = secs_left > 0 ? Math.round((300 - secs_left) / 300 * 100) : 100
@@ -186,17 +186,17 @@ function Btc5mPanel({ d, balance, stats, gas }) {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 3 }}>
             <div style={{ padding: '3px 4px', textAlign: 'center', background: predicted_dir ? `${dc}12` : 'var(--bg3)', border: `1px solid ${predicted_dir ? `${dc}33` : 'var(--border)'}`, borderRadius: 2 }}>
               <div style={{ fontSize: 7, color: 'var(--dim)' }}>PREDICT</div>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 700, color: dc }}>{predicted_dir || '—'}</div>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 700, color: dc }}>{predicted_dir || (signal_ready ? 'WEAK' : '—')}</div>
             </div>
             <div style={{ padding: '3px 4px', textAlign: 'center', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 2 }}>
               <div style={{ fontSize: 7, color: 'var(--dim)' }}>CONF</div>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 700, color: confidence >= .7 ? 'var(--green)' : confidence >= .4 ? 'var(--amber)' : 'var(--dim)' }}>{confidence ? (confidence * 100).toFixed(0) + '%' : '—'}</div>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 700, color: confidence >= .7 ? 'var(--green)' : confidence >= .4 ? 'var(--amber)' : 'var(--dim)' }}>{signal_ready ? (confidence * 100).toFixed(0) + '%' : '—'}</div>
             </div>
           </div>
           {/* Highest confidence seen this window */}
           <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 4px', background: 'var(--bg3)', borderRadius: 2 }}>
             <span style={{ fontSize: 7, color: 'var(--dim)', fontFamily: 'var(--mono)' }}>peak conf</span>
-            <span style={{ fontSize: 7, fontFamily: 'var(--mono)', color: (highest_confidence_seen || 0) >= .7 ? 'var(--green)' : 'var(--amber)' }}>{highest_confidence_seen ? (highest_confidence_seen * 100).toFixed(0) + '%' : '—'}</span>
+            <span style={{ fontSize: 7, fontFamily: 'var(--mono)', color: (highest_confidence_seen || 0) >= .7 ? 'var(--green)' : 'var(--amber)' }}>{signal_ready ? (highest_confidence_seen * 100).toFixed(0) + '%' : '—'}</span>
           </div>
         </div>
       </div>
@@ -484,7 +484,7 @@ export default function App() {
         <SC l="GAJIAN"  v={u2(sal?.total_withdrawn)}                   c="var(--amber)"/>
         <SC l="GAS ORD" v={gas?.orders_left ?? '—'}                   c={gas?.status === 'ok' ? 'var(--white)' : gas?.status === 'low' ? 'var(--amber)' : 'var(--red)'}/>
         <SC l="SCANS"   v={(stats?.scan_count ?? 0).toLocaleString()}/>
-        <SC l="CONF"    v={btc5m?.highest_confidence_seen ? `${(btc5m.highest_confidence_seen * 100).toFixed(0)}%` : '—'} c="var(--dim)"/>
+        <SC l="CONF"    v={btc5m?.signal_ready ? `${((btc5m.highest_confidence_seen || 0) * 100).toFixed(0)}%` : '—'} c="var(--dim)"/>
         <div style={{ flex: 1 }}/>
       </div>
 

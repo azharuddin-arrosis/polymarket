@@ -1,29 +1,30 @@
 # POLYMARKET BOT FINAL
 ## BTC 5m + Soccer Only | Multi-Bot | Per-Bot Dashboard
 
-## Quick Start (3 SIM bots)
+## Quick Start
 ```bash
-docker compose --profile sim up -d --build
+./deploy.sh          # deploy all bots (sim + real) + main dashboard
 ```
 
 ## Ports
-| Service       | URL                      |
-|---------------|--------------------------|
-| Main Dashboard| http://SERVER:3000       |
-| SIM 1         | http://SERVER:3101       |
-| SIM 2         | http://SERVER:3102       |
-| SIM 3         | http://SERVER:3103       |
-| REAL 1        | http://SERVER:3201       |
-| REAL 2        | http://SERVER:3202       |
+| Service        | URL                    |
+|----------------|------------------------|
+| Main Dashboard | http://SERVER:3000     |
+| SIM 1          | http://SERVER:3101     |
+| SIM 2          | http://SERVER:3102     |
+| REAL 1         | http://SERVER:3201     |
+| REAL 2         | http://SERVER:3202     |
 
 ## Run Commands
 ```bash
-docker compose --profile sim up -d --build    # all 3 sim bots
-docker compose up sim1-api sim1-ui main-ui -d # only sim1
-docker compose --profile real1 up -d --build  # real bot 1
-docker compose --profile real up -d --build   # both real bots
-docker compose down                           # stop all
-docker compose logs -f sim1-api               # view logs
+./deploy.sh              # deploy all bots (sim + real) + main dashboard
+./deploy.sh all          # same as above
+./deploy.sh sim          # deploy sim bots only (sim1, sim2 + dashboards)
+./deploy.sh real         # deploy real bots only (real1, real2 + dashboards)
+./deploy.sh down         # stop and remove all containers
+./deploy.sh logs         # tail logs for sim1 (default)
+./deploy.sh logs real1   # tail logs for a specific service
+./deploy.sh status       # show status of all bot containers
 ```
 
 ## Compound Logic (floor(equity/10) = bet)

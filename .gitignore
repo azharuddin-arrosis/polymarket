@@ -8,3 +8,4 @@ data/
 *.pyc
 .DS_Store
 cuk/
+check-saldo/
