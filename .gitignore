@@ -8,4 +8,4 @@ data/
 *.pyc
 .DS_Store
 cuk/
-check-saldo/
+check-saldo/.env

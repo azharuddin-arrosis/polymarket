@@ -31,7 +31,7 @@ except ImportError:
 # Optional py-clob-client — graceful fallback if not installed
 try:
     from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import OrderArgs, OrderType, TradeParams
+    from py_clob_client.clob_types import OrderArgs, OrderType, TradeParams, PartialCreateOrderOptions, ApiCreds
     from py_clob_client.constants import POLYGON
     CLOB_OK = True
 except ImportError:
@@ -504,23 +504,31 @@ def _build_clob_client() -> "ClobClient | None":
             host=CLOB,
             chain_id=POLYGON,
             key=C.poly_private_key,
-            signature_type=1,     # EOA signature
+            signature_type=1,
             funder=None,
+            creds=ApiCreds(
+                api_key=C.poly_api_key,
+                api_secret=C.poly_secret,
+                api_passphrase=C.poly_passphrase,
+            ),
         )
-        client.set_api_creds(client.create_or_derive_api_creds())
         return client
     except Exception as e:
         S.errors.append(f"[clob_init] {str(e)[:60]}")
         return None
 
 async def place_order_with_retry(
-    market_id: str, outcome: str, price: float, size: float, sess
+    market_id: str, outcome: str, price: float, size: float, sess,
+    clob_token_id: str = ""
 ) -> dict:
     """
     Place order with fallback chain:
     1. FOK (Fill-or-Kill) market order
     2. If FOK fails → GTL (Good-Till-Limit) limit order @ $0.95
     3. If GTL fails → MISSED_TRADE
+
+    clob_token_id: ERC-1155 token ID from Gamma clobTokenIds field.
+                   Required by py-clob-client — distinct from Gamma market_id.
     """
     if MODE == "sim":
         # Simulation: 90% FOK success, 9% GTL fallback, 1% missed
@@ -567,9 +575,16 @@ async def place_order_with_retry(
         })
         return {"ok": False, "type": "MISSED", "order_id": ""}
 
-    # Determine token_id: YES → first token, NO → second token
-    # market_id here is the Polymarket condition_id / market_id string
-    token_id = market_id  # CLOB uses token_id per outcome; caller should pass correct token
+    # Determine token_id: use clob_token_id from market dict (ERC-1155 token ID per outcome).
+    # market_id is the Gamma integer ID — NOT valid for CLOB.  caller must pass clob_token_id.
+    if not clob_token_id:
+        add_log("MISSED_TRADE", {
+            "market_id": market_id, "outcome": outcome,
+            "reason": "missing_clob_token_id",
+            "message": "clob_token_id not resolved from Gamma — order aborted to prevent CLOB 404",
+        })
+        return {"ok": False, "type": "MISSED", "order_id": ""}
+    token_id = clob_token_id
 
     # ── Step 1: FOK (Fill-or-Kill) ────────────────────────────
     try:
@@ -580,7 +595,8 @@ async def place_order_with_retry(
             token_id=token_id,
         )
         def _fok():
-            return client.create_and_post_order(fok_args, options={"order_type": OrderType.FOK})
+            ord = client.create_order(fok_args, PartialCreateOrderOptions())
+            return client.post_order(ord, OrderType.FOK)
         resp = await asyncio.get_event_loop().run_in_executor(None, _fok)
         order_id = resp.get("orderID") or resp.get("id") or ""
         if resp.get("status") in ("matched", "MATCHED") or order_id:
@@ -607,7 +623,8 @@ async def place_order_with_retry(
             token_id=token_id,
         )
         def _gtl():
-            return client.create_and_post_order(gtl_args, options={"order_type": OrderType.GTD})
+            ord = client.create_order(gtl_args, PartialCreateOrderOptions())
+            return client.post_order(ord, OrderType.GTD)
         resp = await asyncio.get_event_loop().run_in_executor(None, _gtl)
         order_id = resp.get("orderID") or resp.get("id") or ""
         if order_id:
@@ -760,6 +777,17 @@ async def btc5m_fetch_market(slug: str, sess) -> Optional[dict]:
                             try: outs = json.loads(outs)
                             except: outs = []
                         if any(str(o).lower() in ("up", "down") for o in outs):
+                            # Parse clobTokenIds — list of CLOB token IDs aligned to outcomes[]
+                            # e.g. outcomes=["Up","Down"], clobTokenIds=["<up_token>","<down_token>"]
+                            raw_ids = m.get("clobTokenIds", "[]")
+                            if isinstance(raw_ids, str):
+                                try: raw_ids = json.loads(raw_ids)
+                                except: raw_ids = []
+                            token_map: dict = {}
+                            for idx, o in enumerate(outs):
+                                if idx < len(raw_ids) and raw_ids[idx]:
+                                    token_map[str(o).lower()] = str(raw_ids[idx])
+                            m["_clob_token_map"] = token_map  # {"up": "<id>", "down": "<id>"}
                             return m
                     if evs[0].get("markets"):
                         return evs[0]["markets"][0]
@@ -898,10 +926,16 @@ async def btc5m_entry(sig: dict, secs_left: int, sess):
     if not outs or not prices or len(outs) != len(prices): return
 
     tgt_price = None
+    clob_token_id: str = ""
+    token_map = mkt.get("_clob_token_map", {})
     for i, o in enumerate(outs):
         ol = str(o).lower()
-        if sig["dir"] == "UP"   and ol in ("up", "yes"):  tgt_price = float(prices[i])
-        if sig["dir"] == "DOWN" and ol in ("down", "no"): tgt_price = float(prices[i])
+        if sig["dir"] == "UP"   and ol in ("up", "yes"):
+            tgt_price = float(prices[i])
+            clob_token_id = token_map.get("up") or token_map.get("yes") or ""
+        if sig["dir"] == "DOWN" and ol in ("down", "no"):
+            tgt_price = float(prices[i])
+            clob_token_id = token_map.get("down") or token_map.get("no") or ""
 
     if tgt_price is None or not (0.02 < tgt_price < 0.98): return
 
@@ -910,17 +944,18 @@ async def btc5m_entry(sig: dict, secs_left: int, sess):
     if ev_val < 0.01: return
 
     mkt_dict = {
-        "id":          mkt.get("id", b5["slug"]),
-        "question":    mkt.get("question", f"BTC 5m {b5['slug']}")[:80],
-        "category":    "btc5m",
-        "yes_price":   tgt_price,
-        "no_price":    1-tgt_price,
-        "volume":      float(mkt.get("volume", 0) or 0),
-        "volume_24h":  float(mkt.get("volume24hr", 0) or 0),
-        "end_date":    "",
-        "resolve_sec": secs_left,
-        "resolve_fmt": f"{secs_left}s",
-        "spread":      0,
+        "id":             mkt.get("id", b5["slug"]),
+        "clob_token_id":  clob_token_id,   # ERC-1155 token ID required by CLOB API
+        "question":       mkt.get("question", f"BTC 5m {b5['slug']}")[:80],
+        "category":       "btc5m",
+        "yes_price":      tgt_price,
+        "no_price":       1-tgt_price,
+        "volume":         float(mkt.get("volume", 0) or 0),
+        "volume_24h":     float(mkt.get("volume24hr", 0) or 0),
+        "end_date":       "",
+        "resolve_sec":    secs_left,
+        "resolve_fmt":    f"{secs_left}s",
+        "spread":         0,
     }
     sig_dict = {
         "strategy":   "btc5m",
@@ -1281,6 +1316,7 @@ async def open_position(market: dict, sig: dict):
                 price=sig["price"],
                 size=size,
                 sess=_order_sess,
+                clob_token_id=market.get("clob_token_id", ""),
             )
         if not order_result["ok"]:
             # Rollback reserved capital — order never reached Polymarket
